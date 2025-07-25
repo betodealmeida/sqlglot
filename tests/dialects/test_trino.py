@@ -4,6 +4,22 @@ from tests.dialects.test_dialect import Validator
 class TestTrino(Validator):
     dialect = "trino"
 
+    def test_cte_inline_functions(self):
+        # Basic inline function
+        self.validate_identity(
+            "WITH FUNCTION f(num INTEGER) RETURNS INTEGER RETURN num SELECT F(1)"
+        )
+        
+        # Multiple inline functions
+        self.validate_identity(
+            "WITH FUNCTION double(x INTEGER) RETURNS INTEGER RETURN x * 2, FUNCTION triple(x INTEGER) RETURNS INTEGER RETURN x * 3 SELECT DOUBLE(5), TRIPLE(5)"
+        )
+        
+        # Function with expression body
+        self.validate_identity(
+            "WITH FUNCTION add_tax(price DOUBLE) RETURNS DOUBLE RETURN price * 1.08 SELECT ADD_TAX(100.0)"
+        )
+
     def test_trino(self):
         self.validate_identity("JSON_QUERY(m.properties, 'lax $.area' OMIT QUOTES NULL ON ERROR)")
         self.validate_identity("JSON_EXTRACT(content, json_path)")

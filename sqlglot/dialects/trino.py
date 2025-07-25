@@ -60,12 +60,106 @@ class Trino(Presto):
                 quote=self._parse_json_query_quote(),
                 on_condition=self._parse_on_condition(),
             )
+        
+        def _parse_cte(self) -> t.Optional[exp.CTE]:
+            # Handle inline UDF syntax: WITH FUNCTION name(...) RETURNS type RETURN expr
+            if self._match(TokenType.FUNCTION):
+                # Parse function name and parameters
+                func = self._parse_user_defined_function(kind=TokenType.FUNCTION)
+                if not func:
+                    self.raise_error("Expected function name")
+                    return None
+                
+                # Parse RETURNS type
+                if not self._match_text_seq("RETURNS"):
+                    self.raise_error("Expected RETURNS keyword")
+                    return None
+                
+                returns_type = self._parse_type()
+                
+                # Parse function body
+                if not self._match_texts(("RETURN", "BEGIN")):
+                    self.raise_error("Expected RETURN or BEGIN keyword")
+                    return None
+                
+                is_begin = self._prev.text.upper() == "BEGIN"
+                body = self._parse_user_defined_function_expression()
+                
+                if is_begin:
+                    self._match_text_seq("END")
+                
+                # Create a CTE-like structure for the inline function
+                # We represent it as a CTE with a CREATE FUNCTION statement
+                create_func = self.expression(
+                    exp.Create,
+                    this=func,
+                    kind="FUNCTION",
+                    expression=body,
+                    properties=self.expression(
+                        exp.Properties,
+                        expressions=[
+                            self.expression(
+                                exp.Property,
+                                this=exp.Literal.string("returns"),
+                                value=returns_type
+                            )
+                        ]
+                    ),
+                    exists=False
+                )
+                
+                # Wrap in CTE with function name as alias
+                return self.expression(
+                    exp.CTE,
+                    this=create_func,
+                    alias=self.expression(exp.TableAlias, this=func.this)
+                )
+            
+            # Otherwise, use the parent CTE parser
+            return super()._parse_cte()
 
     class Generator(Presto.Generator):
         PROPERTIES_LOCATION = {
             **Presto.Generator.PROPERTIES_LOCATION,
             exp.LocationProperty: exp.Properties.Location.POST_WITH,
         }
+        
+        def cte_sql(self, expression: exp.CTE) -> str:
+            # Check if this is an inline function CTE
+            if isinstance(expression.this, exp.Create) and expression.this.args.get("kind") == "FUNCTION":
+                create = expression.this
+                func = create.this
+                
+                # Extract function name
+                func_name = self.sql(func.this)
+                
+                # Extract parameters
+                params = []
+                for param in func.expressions:
+                    if isinstance(param, exp.ColumnDef):
+                        param_name = self.sql(param.this)
+                        param_type = self.sql(param.kind)
+                        params.append(f"{param_name} {param_type}")
+                params_str = ", ".join(params)
+                
+                # Extract return type
+                returns_prop = None
+                if hasattr(create, 'args') and 'properties' in create.args and create.args['properties']:
+                    for prop in create.args['properties'].expressions:
+                        if isinstance(prop, exp.Property) and prop.this.this == "returns":
+                            returns_prop = prop.args.get('value')
+                            break
+                
+                returns_type = self.sql(returns_prop) if returns_prop else "INTEGER"
+                
+                # Extract body
+                body = self.sql(create.expression)
+                
+                # Generate inline function syntax
+                return f"FUNCTION {func_name}({params_str}) RETURNS {returns_type} RETURN {body}"
+            
+            # Otherwise use parent implementation
+            return super().cte_sql(expression)
 
         TRANSFORMS = {
             **Presto.Generator.TRANSFORMS,
